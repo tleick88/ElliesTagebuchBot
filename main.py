@@ -1,124 +1,83 @@
+# main.py - Angepasste Version für eine flache Struktur
+
 import os
-import sys
 import threading
-import time
 from dotenv import load_dotenv
-
-# DON'T CHANGE THIS !!!
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-# Lade Umgebungsvariablen
-load_dotenv()
-
 from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
-from src.models.user import db
-from src.routes.user import user_bp
-from src.telegram_bot import TochterErinnerungenBot
 
-app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
-app.config['SECRET_KEY'] = 'asdf#FGSgvasgf$5$WGT'
+# Lade Umgebungsvariablen aus der .env-Datei (für lokale Entwicklung)
+# Auf Render werden diese direkt aus den Environment-Settings geladen.
+load_dotenv()
 
-# CORS aktivieren
-CORS(app)
+# --- WICHTIGE IMPORTE (angepasst für flache Struktur) ---
+# Wir gehen davon aus, dass die folgenden Dateien im selben Ordner wie main.py liegen:
+# - models.py (enthält die User-Klasse und db-Instanz)
+# - routes.py (enthält die user_bp-Blaupause)
+# - telegram_bot.py (enthält die TochterErinnerungenBot-Klasse)
 
+from models import db
+from routes import user_bp
+from telegram_bot import TochterErinnerungenBot
+
+# --- Flask App Konfiguration ---
+# Der 'static' Ordner für Ihre Weboberfläche (z.B. React/Vue Build)
+STATIC_FOLDER = os.path.join(os.path.dirname(__file__), 'static')
+
+app = Flask(__name__, static_folder=STATIC_FOLDER)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'ein-zufaelliger-geheimer-schluessel') # Besser aus Umgebungsvariablen laden
+
+# CORS für die API aktivieren
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+# API-Routen registrieren
 app.register_blueprint(user_bp, url_prefix='/api')
 
-# Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(os.path.dirname(__file__), 'database', 'app.db')}"
+# --- Datenbank Konfiguration ---
+# Render stellt einen persistenten Speicher unter /var/data/ zur Verfügung.
+# Wir erstellen dort einen Ordner für unsere Datenbank.
+DB_FOLDER = '/var/data/database'
+if not os.path.exists(DB_FOLDER):
+    os.makedirs(DB_FOLDER)
+
+DB_PATH = os.path.join(DB_FOLDER, 'app.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{DB_PATH}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
+
+# Erstelle die Datenbanktabellen, falls sie nicht existieren
 with app.app_context():
     db.create_all()
 
-# Bot-Instanz
-bot_instance = None
-bot_thread = None
-
-@app.route('/api/bot/status')
-def bot_status():
-    """API Endpoint um Bot-Status zu überprüfen"""
-    global bot_instance, bot_thread
-    
-    status = {
-        'bot_running': bot_thread is not None and bot_thread.is_alive(),
-        'bot_token_configured': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
-        'openai_configured': bool(os.getenv('OPENAI_API_KEY')),
-        'sheets_configured': bool(os.getenv('GOOGLE_SHEETS_ID'))
-    }
-    
-    return jsonify(status)
-
-@app.route('/api/bot/start', methods=['POST'])
-def start_bot():
-    """API Endpoint um Bot zu starten"""
-    global bot_instance, bot_thread
-    
-    try:
-        if bot_thread and bot_thread.is_alive():
-            return jsonify({'success': False, 'message': 'Bot läuft bereits'})
-        
-        bot_instance = TochterErinnerungenBot()
-        bot_thread = threading.Thread(target=bot_instance.run, daemon=True)
-        bot_thread.start()
-        
-        # Kurz warten um sicherzustellen, dass der Bot startet
-        time.sleep(2)
-        
-        return jsonify({'success': True, 'message': 'Bot erfolgreich gestartet'})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Fehler beim Starten: {str(e)}'})
-
-@app.route('/api/bot/stop', methods=['POST'])
-def stop_bot():
-    """API Endpoint um Bot zu stoppen"""
-    global bot_instance, bot_thread
-    
-    try:
-        if bot_instance and hasattr(bot_instance, 'application'):
-            # Bot stoppen (vereinfacht)
-            bot_instance = None
-            
-        return jsonify({'success': True, 'message': 'Bot gestoppt'})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Fehler beim Stoppen: {str(e)}'})
-
+# --- Statische Dateien für die Weboberfläche ausliefern ---
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve(path):
-    static_folder_path = app.static_folder
-    if static_folder_path is None:
-            return "Static folder not configured", 404
-
-    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
     else:
-        index_path = os.path.join(static_folder_path, 'index.html')
-        if os.path.exists(index_path):
-            return send_from_directory(static_folder_path, 'index.html')
-        else:
-            return "index.html not found", 404
+        return send_from_directory(app.static_folder, 'index.html')
 
-def start_bot_automatically():
-    """Startet den Bot automatisch beim App-Start"""
-    global bot_instance, bot_thread
-    
+# --- Telegram Bot Start ---
+def start_bot_in_thread():
+    """Startet den Bot in einem separaten Thread, damit er den Webserver nicht blockiert."""
+    print("🤖 Starte Telegram Bot automatisch...")
     try:
-        print("🤖 Starte Telegram Bot automatisch...")
         bot_instance = TochterErinnerungenBot()
-        bot_thread = threading.Thread(target=bot_instance.run, daemon=True)
-        bot_thread.start()
-        print("✅ Telegram Bot erfolgreich gestartet!")
-        
+        bot_instance.run() # Die run-Methode sollte blockierend sein (z.B. updater.idle())
+        print("✅ Telegram Bot erfolgreich gestartet und läuft.")
     except Exception as e:
         print(f"❌ Fehler beim automatischen Bot-Start: {e}")
 
+# --- Hauptausführung ---
 if __name__ == '__main__':
-    # Bot automatisch starten
-    start_bot_automatically()
+    # Starte den Bot in einem Hintergrund-Thread
+    bot_thread = threading.Thread(target=start_bot_in_thread, daemon=True)
+    bot_thread.start()
     
-    # Flask App starten
-    print("🌐 Starte Flask Web-Interface...")
-    app.run(host='0.0.0.0', port=5000, debug=False)  # Debug=False um Threading-Probleme zu vermeiden
+    # Starte die Flask Web App
+    # Render stellt die PORT-Variable automatisch zur Verfügung.
+    port = int(os.getenv('PORT', 5000))
+    print(f"🌐 Starte Flask Web-Interface auf Port {port}...")
+    app.run(host='0.0.0.0', port=port)
+
